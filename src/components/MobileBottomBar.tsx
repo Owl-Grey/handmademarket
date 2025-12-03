@@ -27,11 +27,14 @@ const MobileBottomBar = () => {
     setCartLoading(true);
 
     try {
-      const { data: cartRow, error: cartError } = await supabase
+      const { data: cartRows, error: cartError } = await supabase
         .from('cart')
         .select('cart_id')
         .eq('user_id', user.id)
-        .maybeSingle();
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      const cartRow = (cartRows as any[] | null)?.[0] ?? null;
 
       if (cartError || !cartRow) {
         setCartCount(0);

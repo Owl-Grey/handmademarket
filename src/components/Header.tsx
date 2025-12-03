@@ -33,7 +33,10 @@ const Header = ({
   const { user } = useAuth();
   const [theme, setTheme] = useState<string>(() => {
     try {
-      return document.documentElement.getAttribute('data-theme') || (localStorage.getItem('theme') ?? 'dark');
+      return (
+        document.documentElement.getAttribute('data-theme') ||
+        (localStorage.getItem('theme') ?? 'dark')
+      );
     } catch {
       return 'dark';
     }
@@ -50,12 +53,15 @@ const Header = ({
     setCartLoading(true);
 
     try {
-      // 1. корзина пользователя
-      const { data: cartRow, error: cartError } = await supabase
+      // 1. Берём самую новую корзину пользователя (активную)
+      const { data: cartRows, error: cartError } = await supabase
         .from('cart')
         .select('cart_id')
         .eq('user_id', user.id)
-        .maybeSingle();
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      const cartRow = (cartRows as any[] | null)?.[0] ?? null;
 
       if (cartError || !cartRow) {
         setCartCount(0);
@@ -70,11 +76,11 @@ const Header = ({
         .select('count')
         .eq('cart_id', cartId);
 
-        if (goodsError) {
+      if (goodsError) {
         console.error('goods_in_cart count error', goodsError);
         setCartCount(0);
         return;
-        }
+      }
 
       const total = (items ?? []).reduce(
         (sum, row) => sum + (Number((row as any).count) || 0),
