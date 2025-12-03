@@ -123,6 +123,9 @@ const CartPage = () => {
 
     try {
       await createOrderFromCart(user.id);
+      setCartItems([]); // очистили локальную корзину, т.к. создан новый cart_id
+      setMainPhotoByGoodId({});
+      window.dispatchEvent(new Event('cart-updated'));
       alert('Order created! You can view it in your profile.');
       navigate('/profile');
     } catch (e: any) {

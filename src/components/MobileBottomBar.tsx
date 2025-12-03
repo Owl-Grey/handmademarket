@@ -1,8 +1,8 @@
 import { Link } from 'react-router-dom';
 import { useEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../context/AuthContext';
+import { getCartTotalCount } from '../api/cart';
 
 const formatCartCount = (count: number): string => {
   if (count <= 0) return '0';
@@ -27,38 +27,7 @@ const MobileBottomBar = () => {
     setCartLoading(true);
 
     try {
-      const { data: cartRows, error: cartError } = await supabase
-        .from('cart')
-        .select('cart_id')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(1);
-
-      const cartRow = (cartRows as any[] | null)?.[0] ?? null;
-
-      if (cartError || !cartRow) {
-        setCartCount(0);
-        return;
-      }
-
-      const cartId = cartRow.cart_id as string;
-
-      const { data: items, error: goodsError } = await supabase
-        .from('goods_in_cart')
-        .select('count')
-        .eq('cart_id', cartId);
-
-      if (goodsError) {
-        console.error('goods_in_cart count error', goodsError);
-        setCartCount(0);
-        return;
-      }
-
-      const total = (items ?? []).reduce(
-        (sum, row) => sum + (Number((row as any).count) || 0),
-        0,
-      );
-
+      const total = await getCartTotalCount(user.id);
       setCartCount(total);
     } catch (e) {
       console.error('loadCartCount error', e);

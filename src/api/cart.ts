@@ -4,6 +4,7 @@ import type { Good } from '../types';
 
 type CartRow = {
   cart_id: string;
+  is_ordered?: boolean | null;
 };
 
 type GoodsInCartRow = {
@@ -17,49 +18,95 @@ export type CartItem = {
   count: number;
 };
 
-/**
- * Внутренняя функция:
- * - если createIfMissing = true — создаёт корзину, если её ещё нет
- * - если false — вернёт null, если корзины нет
- */
+// Active cart: newest available cart not linked to an order (created_at might not exist, so no ordering by it)
 const getCartId = async (
   userId: string,
   createIfMissing: boolean,
 ): Promise<string | null> => {
-  const { data: cartRow, error: cartErr } = await supabase
+  const { data: cartRows, error: cartErr } = await supabase
     .from('cart')
-    .select('cart_id')
-    .eq('user_id', userId)
-    .maybeSingle();
+    .select('cart_id, is_ordered')
+    .eq('user_id', userId);
 
   if (cartErr) {
     console.error('cart select error', cartErr);
     if (!createIfMissing) return null;
   }
 
-  if (!cartRow) {
-    if (!createIfMissing) return null;
+  const cartList = (cartRows as CartRow[] | null) ?? [];
+  // carts already marked as ordered should be skipped for new purchases
+  const notOrdered = cartList.filter((c) => !(c.is_ordered ?? false));
+  const fallbackIds = cartList.map((c) => c.cart_id);
+  const cartIds = notOrdered.length > 0 ? notOrdered.map((c) => c.cart_id) : fallbackIds;
 
-    const { data: newCart, error: newErr } = await supabase
-      .from('cart')
-      .insert({ user_id: userId })
-      .select('cart_id')
-      .maybeSingle();
+  // carts already used in orders should stay frozen
+  const { data: orderRows, error: orderErr } = await supabase
+    .from('orders')
+    .select('cart_id')
+    .eq('user_id', userId);
+  if (orderErr) {
+    console.error('orders by cart select error', orderErr);
+  }
+  const usedCartIds = new Set(
+    (orderRows as { cart_id: string }[] | null)?.map((o) => o.cart_id) ?? [],
+  );
 
-    if (newErr || !newCart) {
-      console.error('cart insert error', newErr);
-      throw newErr ?? new Error('Не удалось создать корзину');
+  const openCartIds = cartIds.filter((id) => !usedCartIds.has(id));
+
+  // Prefer a cart that already has items
+  let chosenCartId: string | null = openCartIds[0] ?? null;
+  if (openCartIds.length > 0) {
+    const { data: items, error: itemsErr } = await supabase
+      .from('goods_in_cart')
+      .select('cart_id, count')
+      .in('cart_id', openCartIds);
+
+    if (itemsErr) {
+      console.error('goods_in_cart select error', itemsErr);
+    } else {
+      const totals: Record<string, number> = {};
+      for (const row of items ?? []) {
+        const cid = (row as any).cart_id as string;
+        const cnt = Number((row as any).count ?? 0);
+        totals[cid] = (totals[cid] ?? 0) + cnt;
+      }
+      const withGoods = openCartIds.find((id) => (totals[id] ?? 0) > 0);
+      if (withGoods) chosenCartId = withGoods;
     }
-
-    return (newCart as CartRow).cart_id;
   }
 
-  return (cartRow as CartRow).cart_id;
+  if (chosenCartId) return chosenCartId;
+
+  if (!createIfMissing) return null;
+
+  const { data: newCart, error: newErr } = await supabase
+    .from('cart')
+    .insert({ user_id: userId })
+    .select('cart_id')
+    .maybeSingle();
+
+  if (newErr || !newCart) {
+    console.error('cart insert error', newErr);
+    throw newErr ?? new Error('Не удалось создать корзину');
+  }
+
+  return (newCart as CartRow).cart_id;
 };
 
-/** Общее количество товаров в корзине (для бейджа в хедере) */
+export const getActiveCartId = async (userId: string): Promise<string | null> =>
+  getCartId(userId, false);
+
+export const getOrCreateActiveCartId = async (
+  userId: string,
+): Promise<string> => {
+  const id = await getCartId(userId, true);
+  if (!id) throw new Error('Не удалось получить корзину');
+  return id;
+};
+
+/** Total items in current (active) cart */
 export const getCartTotalCount = async (userId: string): Promise<number> => {
-  const cartId = await getCartId(userId, false);
+  const cartId = await getActiveCartId(userId);
   if (!cartId) return 0;
 
   const { data, error } = await supabase
@@ -80,12 +127,12 @@ export const getCartTotalCount = async (userId: string): Promise<number> => {
   return total;
 };
 
-/** Количество КОНКРЕТНОГО товара в корзине (для ProductCard / ProductPage) */
+/** Count for a specific good in current cart (ProductCard / ProductPage) */
 export const getCartCountForGood = async (
   userId: string,
   goodId: string,
 ): Promise<number | null> => {
-  const cartId = await getCartId(userId, false);
+  const cartId = await getActiveCartId(userId);
   if (!cartId) return null;
 
   const { data, error } = await supabase
@@ -104,19 +151,17 @@ export const getCartCountForGood = async (
 };
 
 /**
- * Изменить количество товара в корзине на delta:
- * - delta > 0 → добавляем
- * - delta < 0 → убавляем
- * Возвращает:
- *   - новое количество
- *   - null, если товара больше нет в корзине
+ * Change count for a good in current cart by delta:
+ * - delta > 0 — increment
+ * - delta < 0 — decrement / delete if <= 0
+ * returns new count or null if removed
  */
 export const changeCartItemCount = async (
   userId: string,
   goodId: string,
   delta: number,
 ): Promise<number | null> => {
-  const cartId = await getCartId(userId, true); // создаём при необходимости
+  const cartId = await getOrCreateActiveCartId(userId); // create cart if missing
   if (!cartId) throw new Error('Не удалось получить корзину');
 
   const { data: existing, error: existErr } = await supabase
@@ -131,7 +176,7 @@ export const changeCartItemCount = async (
     throw existErr;
   }
 
-  // Если строки ещё нет
+  // no existing row
   if (!existing) {
     if (delta <= 0) return null;
 
@@ -153,7 +198,7 @@ export const changeCartItemCount = async (
     return (inserted as GoodsInCartRow).count ?? delta;
   }
 
-  // Строка есть — обновляем
+  // existing row — update or delete
   const row = existing as GoodsInCartRow;
   const newCount = (row.count ?? 0) + delta;
 
@@ -186,14 +231,14 @@ export const changeCartItemCount = async (
   return (updated as GoodsInCartRow).count ?? newCount;
 };
 
-/** Список товаров в корзине с данными из goods (без join-алиасов) */
+/** List of cart items with goods data */
 export const getCartItemsWithGoods = async (
   userId: string,
 ): Promise<CartItem[]> => {
-  const cartId = await getCartId(userId, false);
+  const cartId = await getActiveCartId(userId);
   if (!cartId) return [];
 
-  // 1. Берём позиции из goods_in_cart
+  // 1. items from goods_in_cart
   const { data: rows, error } = await supabase
     .from('goods_in_cart')
     .select('good_id, count')
@@ -209,7 +254,7 @@ export const getCartItemsWithGoods = async (
 
   const goodIds = Array.from(new Set(items.map((r) => r.good_id)));
 
-  // 2. Подтягиваем сами товары
+  // 2. load goods
   const { data: goodsData, error: goodsErr } = await supabase
     .from('goods')
     .select('*')
@@ -225,7 +270,7 @@ export const getCartItemsWithGoods = async (
     goodsMap[g.id] = g;
   }
 
-  // 3. Склеиваем
+  // 3. build result
   const result: CartItem[] = [];
   for (const row of items) {
     const good = goodsMap[row.good_id];

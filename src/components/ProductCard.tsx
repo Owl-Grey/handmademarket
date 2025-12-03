@@ -1,9 +1,13 @@
 // src/components/ProductCard.tsx
 import { Link } from 'react-router-dom';
+import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabaseClient';
 import type { Good } from '../types';
 import { useAuth } from '../context/AuthContext';
-import { useState, useEffect } from 'react';
+import {
+  changeCartItemCount as apiChangeCartItemCount,
+  getCartCountForGood,
+} from '../api/cart';
 
 type ProductCardProps = {
   good: Good;
@@ -19,9 +23,9 @@ const ProductCard = ({ good, photoUrl, variant = 'default' }: ProductCardProps) 
   const [favLoading, setFavLoading] = useState(false);
 
   const descLimit = variant === 'hot' ? 90 : 70;
-  const stock = good.count ?? null; // остаток товара
+  const stock = good.count ?? null;
 
-  // грузим начальное количество этого товара в корзине
+  // загрузка количества товара в активной корзине
   useEffect(() => {
     const loadCount = async () => {
       if (!user) {
@@ -30,40 +34,14 @@ const ProductCard = ({ good, photoUrl, variant = 'default' }: ProductCardProps) 
       }
 
       try {
-        // корзина пользователя
-        const { data: cartRow, error: cartErr } = await supabase
-          .from('cart')
-          .select('cart_id')
-          .eq('user_id', user.id)
-          .maybeSingle();
-
-        if (cartErr || !cartRow) {
-          setCountInCart(null);
-          return;
-        }
-
-        const cartId = cartRow.cart_id as string;
-
-        // запись по этому товару
-        const { data: item, error: itemErr } = await supabase
-          .from('goods_in_cart')
-          .select('id, count')
-          .eq('cart_id', cartId)
-          .eq('good_id', good.id)
-          .maybeSingle();
-
-        if (itemErr || !item) {
-          setCountInCart(null);
-          return;
-        }
-
-        setCountInCart(item.count ?? 1);
+        const cnt = await getCartCountForGood(user.id, good.id);
+        setCountInCart(cnt ?? null);
       } catch (e) {
         console.error('load item count error', e);
       }
     };
 
-    loadCount();
+    void loadCount();
   }, [user, good.id]);
 
   useEffect(() => {
@@ -102,7 +80,7 @@ const ProductCard = ({ good, photoUrl, variant = 'default' }: ProductCardProps) 
     e.stopPropagation();
 
     if (!user) {
-      alert('Чтобы отмечать товары как избранные, войдите в аккаунт.');
+      alert('Чтобы добавить в избранное, нужно войти в аккаунт.');
       return;
     }
 
@@ -134,23 +112,22 @@ const ProductCard = ({ good, photoUrl, variant = 'default' }: ProductCardProps) 
       }
     } catch (err) {
       console.error('toggle favorite error', err);
-      alert('Не удалось обновить избранное');
+      alert('Не удалось обновить избранное.');
     } finally {
       setFavLoading(false);
     }
   };
 
-  // универсальный хэндлер изменения количества
+  // изменение количества в корзине
   const changeCartCount = async (delta: number) => {
     if (!user) {
-      alert('Чтобы добавить товар в корзину, войди в аккаунт.');
+      alert('Чтобы добавить в корзину, нужно войти в аккаунт.');
       return;
     }
     if (updating) return;
 
     const currentUi = countInCart ?? 0;
 
-    // локально проверяем лимит по остатку
     if (delta > 0 && stock != null && currentUi >= stock) {
       alert(`Нельзя добавить больше, чем есть в наличии (${stock} шт.).`);
       return;
@@ -159,135 +136,18 @@ const ProductCard = ({ good, photoUrl, variant = 'default' }: ProductCardProps) 
     setUpdating(true);
 
     try {
-      // 1. корзина пользователя
-      const { data: cartRow, error: cartErr } = await supabase
-        .from('cart')
-        .select('cart_id')
-        .eq('user_id', user.id)
-        .maybeSingle();
+      const newCount = await apiChangeCartItemCount(user.id, good.id, delta);
 
-      let cartId: string;
-
-      if (cartErr) {
-        console.error('cart error', cartErr);
-        alert('Ошибка при получении корзины');
-        return;
-      }
-
-      if (!cartRow) {
-        if (delta <= 0) {
-          return;
-        }
-
-        // если остаток 0 — добавить нельзя
-        if (stock != null && stock <= 0) {
-          alert('Товар закончился, добавить его в корзину нельзя.');
-          return;
-        }
-
-        const { data: newCart, error: newErr } = await supabase
-          .from('cart')
-          .insert({ user_id: user.id })
-          .select()
-          .maybeSingle();
-
-        if (newErr || !newCart) {
-          console.error('create cart error', newErr);
-          alert('Не удалось создать корзину');
-          return;
-        }
-
-        cartId = newCart.cart_id as string;
+      if (newCount == null) {
+        setCountInCart(null);
       } else {
-        cartId = cartRow.cart_id as string;
+        setCountInCart(newCount);
       }
 
-      // 2. ищем строку по этому товару
-      const { data: existing, error: existErr } = await supabase
-        .from('goods_in_cart')
-        .select('id, count')
-        .eq('cart_id', cartId)
-        .eq('good_id', good.id)
-        .maybeSingle();
-
-      if (existErr) {
-        console.error('select item error', existErr);
-        alert('Ошибка при обращении к корзине');
-        return;
-      }
-
-      let newCount: number;
-
-      if (!existing) {
-        if (delta <= 0) return;
-
-        const initialCount = 1;
-
-        if (stock != null && initialCount > stock) {
-          alert(`Нельзя добавить больше, чем есть в наличии (${stock} шт.).`);
-          return;
-        }
-
-        const { data: inserted, error: insErr } = await supabase
-          .from('goods_in_cart')
-          .insert({ cart_id: cartId, good_id: good.id, count: initialCount })
-          .select('count')
-          .maybeSingle();
-
-        if (insErr || !inserted) {
-          console.error('insert item error', insErr);
-          alert('Не удалось добавить товар в корзину');
-          return;
-        }
-
-        newCount = inserted.count ?? initialCount;
-      } else {
-        const currentDb = existing.count ?? 0;
-        newCount = currentDb + delta;
-
-        if (delta > 0 && stock != null && newCount > stock) {
-          alert(`Нельзя добавить больше, чем есть в наличии (${stock} шт.).`);
-          return;
-        }
-
-        if (newCount <= 0) {
-          const { error: delErr } = await supabase
-            .from('goods_in_cart')
-            .delete()
-            .eq('id', existing.id);
-
-          if (delErr) {
-            console.error('delete item error', delErr);
-            alert('Не удалось удалить товар из корзины');
-            return;
-          }
-
-          setCountInCart(null);
-          window.dispatchEvent(new Event('cart-updated'));
-          return;
-        }
-
-        const { data: updated, error: updErr } = await supabase
-          .from('goods_in_cart')
-          .update({ count: newCount })
-          .eq('id', existing.id)
-          .select('count')
-          .maybeSingle();
-
-        if (updErr || !updated) {
-          console.error('update item error', updErr);
-          alert('Не удалось обновить количество товара');
-          return;
-        }
-
-        newCount = updated.count ?? newCount;
-      }
-
-      setCountInCart(newCount);
       window.dispatchEvent(new Event('cart-updated'));
     } catch (err) {
       console.error(err);
-      alert('Что-то пошло не так при обновлении корзины');
+      alert('Не удалось обновить корзину.');
     } finally {
       setUpdating(false);
     }
@@ -312,7 +172,8 @@ const ProductCard = ({ good, photoUrl, variant = 'default' }: ProductCardProps) 
   };
 
   const stockIsZero = stock != null && stock <= 0;
-  const disablePlus = updating || stockIsZero || (stock != null && (countInCart ?? 0) >= stock);
+  const disablePlus =
+    updating || stockIsZero || (stock != null && (countInCart ?? 0) >= stock);
 
   return (
     <Link to={`/product/${good.id}`} className="product-card-link">
@@ -327,13 +188,13 @@ const ProductCard = ({ good, photoUrl, variant = 'default' }: ProductCardProps) 
               onLoad={(e) => e.currentTarget.classList.add('loaded')}
             />
           ) : (
-            <div className="product-image placeholder photo-placeholder">нет фото</div>
+            <div className="product-image placeholder photo-placeholder">Нет фото</div>
           )}
           <button
             className={`fav-btn ${isFavorite ? 'active' : ''}`}
             onClick={toggleFavorite}
             aria-pressed={isFavorite}
-            title={isFavorite ? 'Убрать из избранного' : 'Добавить в избранное'}
+            title={isFavorite ? 'Убрать из избранного' : 'В избранное'}
           >
             ♥
           </button>
@@ -364,7 +225,7 @@ const ProductCard = ({ good, photoUrl, variant = 'default' }: ProductCardProps) 
                   onClick={handleMinusClick}
                   disabled={updating}
                 >
-                  −
+                  -
                 </button>
                 <span className="product-order-qty-value">{countInCart}</span>
                 <button

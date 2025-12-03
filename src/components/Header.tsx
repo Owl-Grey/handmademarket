@@ -1,7 +1,7 @@
 // src/components/Header.tsx
 import { Link } from 'react-router-dom';
 import { useEffect, useState, useCallback } from 'react';
-import { supabase } from '../lib/supabaseClient';
+import { getCartTotalCount } from '../api/cart';
 import { useAuth } from '../context/AuthContext';
 
 type HeaderProps = {
@@ -53,40 +53,7 @@ const Header = ({
     setCartLoading(true);
 
     try {
-      // 1. Берём самую новую корзину пользователя (активную)
-      const { data: cartRows, error: cartError } = await supabase
-        .from('cart')
-        .select('cart_id')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(1);
-
-      const cartRow = (cartRows as any[] | null)?.[0] ?? null;
-
-      if (cartError || !cartRow) {
-        setCartCount(0);
-        return;
-      }
-
-      const cartId = cartRow.cart_id as string;
-
-      // 2. считаем товары в goods_in_cart
-      const { data: items, error: goodsError } = await supabase
-        .from('goods_in_cart')
-        .select('count')
-        .eq('cart_id', cartId);
-
-      if (goodsError) {
-        console.error('goods_in_cart count error', goodsError);
-        setCartCount(0);
-        return;
-      }
-
-      const total = (items ?? []).reduce(
-        (sum, row) => sum + (Number((row as any).count) || 0),
-        0,
-      );
-
+      const total = await getCartTotalCount(user.id);
       setCartCount(total);
     } catch (e) {
       console.error('loadCartCount error', e);
